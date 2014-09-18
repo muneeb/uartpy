@@ -1,0 +1,159 @@
+#!/usr/bin/python
+import sys
+import getopt
+import StringIO
+
+from nta import *
+import lrumodel
+
+
+class NTAConditionLRU_AMD(NTACondition):
+    r"""
+    Class containing conditions for doing NTA analysis using LRU replacement.
+
+    Attributes:
+        r2s         - Map between reuse distances and stack distances.
+        l1_lower    - Lower threshold for l1 cache (lines), used when deciding
+                      whether a cache access hits l1 or l2.
+        l1_upper    - Upper threshold for l1 cache (lines), used when
+                      determining whether the NTA status is propagated or not.
+        patch_size  - Patch size in lines
+    """
+
+    def __init__(self, line_size, l1l_size, l1u_size, patch_size):
+        self.l1_lower = l1l_size / line_size
+        self.l1_upper = l1u_size / line_size
+        self.patch_size = patch_size / line_size
+
+        NTACondition.__init__(self)
+
+    def init(self, pcs, global_rdist_hist):
+        self.r2s = lrumodel.lru_sdist(global_rdist_hist)
+
+        NTACondition.init(self, pcs, global_rdist_hist)
+
+    def rdist_follow(self, rdist):
+        return self.r2s[rdist] < self.l1_upper
+
+    def rdist_patch(self, rdist):
+        return self.r2s[rdist] >= self.patch_size
+
+    def rdist_inhibit(self, rdist):
+        sdist = self.r2s[rdist]
+        return sdist >= self.l1_lower and sdist < self.patch_size
+
+    def hist_weight(self, rdist_hist):
+        return self.r2s[max(rdist_hist.keys())]
+
+class Conf():
+    def __init__(self):
+        self.infile = None
+        self.line_size = 64
+        self.cache_size = 1024 * 1024
+        self.l1u_size = 64*1024
+        self.l1l_size = self.l1u_size
+        self.min_gain_frac = 0.01
+        self.min_samples = 50
+
+        self.verbose = False
+        self.debug = False
+
+    def __str__(self):
+        out = StringIO.StringIO()
+        print >> out, "# Parameters:"
+        for param, value in self.__dict__.items():
+            print >> out, "#  %s: %s" % (param, str(value))
+
+        return out.getvalue()
+
+    def usage(self, error=None, file=sys.stdout):
+        print >> file, \
+"""Usage: nta_amd.py [OPTION...]
+Outputs a patch file that limits an applications cache usage to a predetermined
+partition using non-temporal patching.
+
+  -i FILE                    Input file
+
+  -p SIZE                    Partition size (default: %i)
+  -c SIZE                    Lower L1 size (default: %i)
+  -C SIZE                    Upper L1 size (default: %i)
+  -l SIZE                    Line size (default: %i)
+
+  -g THRESHOLD               Minimum gain/count fraction (default: %.2f)
+  -s THRESHOLD               Minimum number of samples (default: %i)
+
+  -v                         Verbose output
+  -d                         Debug output
+  -h                         Print usage""" % (self.cache_size,
+                                               self.l1l_size,
+                                               self.l1u_size,
+                                               self.line_size,
+                                               self.min_gain_frac,
+                                               self.min_samples)
+        if error != None:
+            print >> file
+            print >> file, "Error: %s" % error
+
+    def parse(self):
+        short_opts = 'i:p:c:C:l:g:s:vdh'
+        long_opts  = [ ]
+
+        try:
+            opts, args = getopt.getopt(sys.argv[1:], short_opts, long_opts)
+        except getopt.GetoptError, e:
+            self.usage(error=str(e), file=sys.stderr)
+            sys.exit(1)
+
+        for o, a in opts:
+            if o in ('-i'):
+                self.infile = a
+
+            elif o in ('-p'):
+                self.cache_size = int(a)
+            elif o in ('-c'):
+                self.l1l_size = int(a)
+            elif o in ('-C'):
+                self.l1u_size = int(a)
+            elif o in ('-l'):
+                self.line_size = int(a)
+
+            elif o in ('-g'):
+                self.min_gain_frac = float(a)
+            elif o in ('-s'):
+                self.min_samples = int(a)
+
+            elif o in ('-v'):
+                self.verbose = True
+            elif o in ('-d'):
+                self.debug  = True
+            elif o in ('-h'):
+                self.usage()
+                sys.exit(0);
+
+            else:
+                assert(False)
+
+
+def main():
+    conf = Conf()
+    conf.parse()
+
+    nta_condition = NTAConditionLRU_AMD(conf.line_size, conf.l1l_size,
+                                        conf.l1u_size, conf.cache_size)
+    nta_finder = NTAFinder(conf.infile, nta_condition,
+                           verbose=conf.verbose,
+                           debug=conf.debug)
+
+    if conf.verbose:
+        print "# Command line: %s" % str(sys.argv)
+        print str(conf)
+
+    for addr, info in nta_finder.find_patch_sites():
+        if info:
+            print "# %s" % info
+
+        print "%.4x" % addr
+
+
+if __name__ == '__main__':
+    sys.exit(main())

@@ -1,0 +1,252 @@
+#!/usr/bin/python
+import sys
+import pyusf
+
+class NTAFinderError(Exception):
+    """Base class for NTAFinderError"""
+    
+    def __init__(self, message):
+        self.message = message
+
+    def __str__(self):
+        return "Error: %s" % self.message
+
+class NTAFinderFormatError(NTAFinderError):
+    """File format error"""
+
+    def __init__(self, message):
+        NTAFinderError.__init__(self, message)
+
+class NTACondition:
+    r"""
+    Base class for an NTA condition
+
+    Attributes:
+        pcs        - Map between pc1 and a map indexed by pc2 with a reuse
+                     distance histogram as its value.
+    """
+
+    def __init__(self):
+        pass
+
+    def init(self, pcs, global_rdist_hist):
+        r"""
+        Local init function called by the NTAFinder class when this condition
+        is used. Used to initialize structures that depend on data in the
+        sample file.
+        """
+        self.pcs = pcs
+
+    def _rdist_hist_or_func(self, rdist_hist, func):
+        r"""
+        Creates the logical or of a function, func, applied to every reuse
+        distance in a histogram.
+        """
+
+        for rdist in rdist_hist.keys():
+            if func(rdist):
+                return True
+        return False
+
+    def _dep_group_or_hist_func(self, pc1, func):
+        r"""
+        Creates the logical or of a function, func, applied to every 
+        forward reuse distance histogram in the dependece group surrounding
+        pc1. The dependence group is defined by the follow function.
+        """
+
+        group = set()
+
+        def apply_func(pc1):
+            group.add(pc1)
+
+            pc1_info = self.pcs[pc1]
+            for pc2_rdists in pc1_info.values():
+                if func(pc2_rdists):
+                    return True
+
+            for pc2, pc2_rdists in pc1_info.items():
+                if pc2 not in group and self.hist_follow(pc2_rdists):
+                    if apply_func(pc2):
+                        return True
+
+            return False
+
+        return apply_func(pc1)
+
+    def rdist_follow(self, rdist):
+        r"""
+        Returns True if the presented reuse distance causes the NT
+        bit to propagate to PC2, False otherwise. This function defines
+        dependence groups in this context.
+        """
+
+        return False
+
+    def hist_follow(self, rdist_hist):
+        return self._rdist_hist_or_func(rdist_hist, self.rdist_follow)
+
+    def rdist_patch(self, rdist):
+        r"""
+        Returns True if the presented reuse distance is a suitable
+        candidate for NTA patching, False otherwise. Note that patching may
+        still be inhibited depending on other PCs in the dependence group.
+        """
+
+        return False
+
+    def hist_patch(self, rdist_hist):
+        return self._rdist_hist_or_func(rdist_hist, self.rdist_patch)
+
+    def rdist_inhibit(self, rdist):
+        r"""
+        Returns True if the presented reuse distance inhibits NTA
+        patching of the entire dependence group, False otherwise.
+        """
+
+        return True
+
+    def hist_inhibit(self, rdist_hist):
+        return self._rdist_hist_or_func(rdist_hist, self.rdist_inhibit)
+
+
+    def hist_weight(self, rdist_hist):
+        r"""
+        Returns the weight of a specific patch site. Used when
+        calculating the importance of a patch site. Should ususally be
+        a stack distance.
+        """
+
+        return 1
+
+    def info(self, pc1, pc2_rdists):
+        r"""
+        Returns a verbose description of a patch site. Returns None if
+        there is no verbose information available.
+        """
+
+        return "Maximum weight: %i" % self.weight(pc1)
+
+
+    def is_patch_candidate(self, pc1):
+        r"""
+        Returns true if a pc1 may be suitable for patching. Patching may still
+        be inhibited if inhibit_group is true.
+        """
+
+        for pc2_hist in self.pcs[pc1].values():
+            if self.hist_patch(pc2_hist):
+                return True
+        return False
+
+    def inhibit_group(self, pc1):
+        r"""
+        Checks if the dependence group surrounding pc1 contains any forward
+        reuse distance that inhibits patching.
+        """
+
+        return self._dep_group_or_hist_func(pc1, self.rdist_inhibit)
+
+    def weight(self, pc1):
+        r"""
+        Calculates the "weight" of a patch site. A heigher weight should
+        correspond to a higher benefit from patching.
+
+        The current implementation merges all forward reuse distance histograms
+        for pc1 and uses the hist_weight function to calculate a weight for the
+        merged histogram.
+        """
+
+        group_hist = {}
+
+        def add_hist(pc2_hist):
+            for rdist, weight in pc2_hist:
+                group_hist[rdist] = group_hist.get(rdist, 0) + weight
+
+        for pc2_hist in self.pcs[pc1].values():
+            add_hist(pc2_hist)
+
+        return self.hist_weight(group_hist)
+
+class NTAFinder:
+    r"""
+    Finds NTA candidates by analyzing a USF file.
+
+    Attributes:
+        pcs        - Map between pc1 and a map indexed by pc2 with a reuse
+                     distance histogram as its value.
+        rdist_hist - Map between reuse distances and sample counts.
+        nta        - Instance of a condition class that implements the
+                     follow/patch/inhibit rules.
+        verbose    - True if verbose output is enabled.
+        debug      - True if debug output is enabled.
+    """
+
+    def __init__(self, file_name, condition, verbose = False, debug = False):
+        self.verbose = verbose
+        self.debug = debug
+
+        usf_file = pyusf.Usf()
+        usf_file.open(file_name)
+
+        if usf_file.header.flags & pyusf.USF_FLAG_TRACE:
+            raise NTAFinderFormatError("Input is not a sample file.")
+
+        self.pcs = {}
+        self.rdist_hist = None
+
+        for event in usf_file:
+            if isinstance(event, pyusf.Burst):
+                if self.rdist_hist is None:
+                    self.rdist_hist = {}
+                else:
+                    raise NTAFinderFormatError(
+                        "Unsupported file format, more than one burst.")
+            elif isinstance(event, pyusf.Sample):
+                self.__add_rdist(event.begin, event.end)
+            elif isinstance(event, pyusf.Dangling):
+                self.__add_rdist(event.begin, None)
+            else:
+                raise NTAFinderFormatError("Input file contains unexpected events.")
+
+
+        self.nta = condition
+        self.nta.init(self.pcs, self.rdist_hist)
+
+    def __add_rdist(self, begin, end):
+        if self.rdist_hist is None:
+            raise NTAFinderFormatError(
+                "Input contains no burst event before first sample.")
+
+        if end is not None:
+            rdist = event.end.time - event.begin.time - 1
+            self.pcs[begin.pc][end.pc][rdist] = 
+        else:
+            rdist = sys.maxint
+
+        self.rdist_hist[rdist] = self.rdist_hist.get(rdist, 0) + 1
+
+    def _debug(self, msg):
+        if self.debug:
+            print >> sys.stderr, msg
+
+    def _verbose(self, msg):
+        if self.verbose or self.debug:
+            print >> sys.stderr, msg
+
+    def find_patch_sites(self):
+        patch_sites = []
+
+        print self.pcs.items()
+
+        for (pc1, pc2_rdists) in self.pcs.items():
+            is_candidate = self.nta.is_patch_candidate(pc1)
+            has_group_inhibit = self.nta.inhibit_group(pc1)
+
+            self._debug("0x%.4x: [is_candidate: %i, has_group_inhibit: %i]" % (
+                    pc1, is_candidate, has_group_inhibit))
+
+            if is_candidate and not has_group_inhibit:
+                patch_sites.append((pc1, self.nta.info(pc2_rdists)))
+
+        return patch_sites

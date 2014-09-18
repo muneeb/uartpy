@@ -1,0 +1,12 @@
+#!/usr/bin/python
+
+def pc2_range(start, stop):
+    return lambda pc1, pc2, rdist: (pc2 != None and
+                                    pc2.pc >= start and
+                                    pc2.pc <= stop)
+
+
+class SampleFilter:
+    def __init__(self):
+        filter = None
+    

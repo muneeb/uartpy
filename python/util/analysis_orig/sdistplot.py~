@@ -1,0 +1,7 @@
+#!/usr/bin/python
+import sys
+import getopt
+
+import lrumodel
+
+__version__ = "$Revision$"
